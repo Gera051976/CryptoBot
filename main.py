@@ -1,4 +1,3 @@
-# main.py
 from aiogram import Bot, Dispatcher, types
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -110,15 +109,13 @@ async def start_command(message: types.Message):
     await message.reply("Бот запущен и работает по расписанию!")
 
 # Настройка планировщика
-def setup_scheduler():
+async def main():
+    # Настройка расписания: с 9:00 до 20:00 каждые 5 минут
     scheduler.add_job(
         check_for_new_news,
-        'cron',
-        day_of_week='mon-fri',  # Отправка с понедельника по пятницу
-        hour='10-20',           # Каждый час с 10:00 до 20:00
-        minute='0',             # На нулевой минуте каждого часа
-        timezone='Europe/Moscow'
+        CronTrigger(hour="9-20", minute="*/5", day_of_week="mon-fri", timezone="Europe/Moscow")
     )
+    scheduler.start()
 
 # Основная функция запуска
 async def main():
