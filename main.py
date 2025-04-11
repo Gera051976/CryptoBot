@@ -4,6 +4,7 @@ from aiohttp import web
 import feedparser
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from aiogram.filters.command import CommandStart
 from dotenv import load_dotenv
 import os
@@ -108,19 +109,14 @@ async def on_shutdown(app: web.Application):
 async def start_command(message: types.Message):
     await message.reply("Бот запущен и работает по расписанию!")
 
-# Настройка планировщика
+# Основная функция запуска
 async def main():
-    # Настройка расписания: с 9:00 до 20:00 каждые 5 минут
+    # Настройка планировщика
     scheduler.add_job(
         check_for_new_news,
         CronTrigger(hour="9-20", minute="*/5", day_of_week="mon-fri", timezone="Europe/Moscow")
     )
-    scheduler.start()
-
-# Основная функция запуска
-async def main():
-    # Настройка планировщика
-    setup_scheduler()
+    # Для AsyncIOScheduler start() не обязателен, но оставим для явной инициализации
     scheduler.start()
 
     # Создание веб-приложения
