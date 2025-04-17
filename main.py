@@ -3,14 +3,15 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 import feedparser
 import logging
+import os
+import socket
+import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram.filters.command import CommandStart
 from dotenv import load_dotenv
-import os
-import asyncio
 
-# Загрузка переменных окружения из .env (для локальной разработки)
+# Загрузка переменных окружения
 load_dotenv()
 
 # Настройка логирования
@@ -37,6 +38,19 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 sent_news_ids = set()
 
+# Проверка доступности порта
+def check_port_availability(host, port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+        logger.info(f"Порт {port} свободен и доступен")
+        return True
+    except OSError as e:
+        logger.error(f"Порт {port} занят: {e}")
+        return False
+    finally:
+        sock.close()
+
 # Получение последних новостей из RSS-ленты
 def get_latest_news():
     try:
@@ -45,7 +59,6 @@ def get_latest_news():
             logger.info("Новых записей в RSS-ленте не найдено")
             return []
         
-        # Проверяем последние 3 записи
         latest_entries = rss_feed.entries[:3]
         news_items = []
         for entry in latest_entries:
@@ -89,20 +102,30 @@ async def check_for_new_news():
 
 # Действия при запуске бота
 async def on_startup(bot: Bot):
-    await bot.set_webhook(f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
-    logger.info("Вебхук установлен: %s", f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
+    webhook_url = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
     try:
+        await bot.set_webhook(webhook_url)
+        logger.info(f"Вебхук установлен: {webhook_url}")
         me = await bot.get_me()
         logger.info(f"Бот подключен: {me.username}")
     except Exception as e:
-        logger.error(f"Ошибка подключения к Telegram: {e}")
+        logger.error(f"Ошибка настройки вебхука или подключения к Telegram: {e}")
+        raise
 
 # Действия при остановке бота
 async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    await bot.session.close()
-    scheduler.shutdown(wait=False)  # Немедленное завершение задач
-    logger.info("Бот остановлен")
+    try:
+        await bot.delete_webhook()
+        logger.info("Вебхук удален")
+    except Exception as e:
+        logger.error(f"Ошибка удаления вебхука: {e}")
+    
+    if hasattr(bot, 'session'):
+        await bot.session.close()
+        logger.info("Сессия бота закрыта")
+    
+    scheduler.shutdown(wait=False)
+    logger.info("Планировщик остановлен")
 
 # Обработчик команды /start
 @dp.message(CommandStart())
@@ -111,13 +134,18 @@ async def start_command(message: types.Message):
 
 # Основная функция запуска
 async def main():
+    # Проверка доступности порта перед запуском
+    if not check_port_availability(WEB_SERVER_HOST, WEB_SERVER_PORT):
+        logger.error(f"Не удалось запустить бота: порт {WEB_SERVER_PORT} недоступен")
+        return
+
     # Настройка планировщика
     scheduler.add_job(
         check_for_new_news,
         CronTrigger(hour="9-20", minute="*/5", day_of_week="mon-fri", timezone="Europe/Moscow")
     )
-    # Для AsyncIOScheduler start() не обязателен, но оставим для явной инициализации
     scheduler.start()
+    logger.info("Планировщик запущен")
 
     # Создание веб-приложения
     app = web.Application()
@@ -128,32 +156,51 @@ async def main():
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
 
-    # Запуск бота
-    await on_startup(bot)
+    # Создание сокета с SO_REUSEADDR
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((WEB_SERVER_HOST, WEB_SERVER_PORT))
+        sock.listen(1)
+        sock.setblocking(False)
+        logger.info(f"Сокет привязан к {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
+    except Exception as e:
+        logger.error(f"Ошибка привязки сокета: {e}")
+        sock.close()
+        raise
 
     # Запуск веб-сервера
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, WEB_SERVER_HOST, WEB_SERVER_PORT)
-    await site.start()
+    site = web.TCPSite(runner, sock=sock)
+    try:
+        await site.start()
+        logger.info(f"Сервер запущен на {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
+    except Exception as e:
+        logger.error(f"Ошибка запуска сервера: {e}")
+        await runner.cleanup()
+        raise
 
-    logger.info(f"Сервер запущен на {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
+    # Выполнение задач при запуске
+    await on_startup(bot)
 
-    # Держим приложение работающим
+    # Удержание приложения в работе
     try:
         await asyncio.Event().wait()
     except asyncio.CancelledError:
-        logger.info("Приложение завершено")
+        logger.info("Приложение завершает работу")
     finally:
+        await site.stop()
         await runner.cleanup()
 
 if __name__ == '__main__':
-    # Используем существующий событийный цикл
     loop = asyncio.get_event_loop()
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Программа завершена пользователем")
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка: {e}")
     finally:
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
